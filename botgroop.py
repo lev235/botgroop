@@ -1,6 +1,6 @@
 import os
 from telegram import (
-    Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
+    Update, InlineKeyboardMarkup, InlineKeyboardButton
 )
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler,
@@ -11,12 +11,10 @@ import logging
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PORT = int(os.getenv("PORT", "8443"))
 
-user_data = {}  # {user_id: {'groups': set(), 'photo': file_id, 'caption': str}}
+user_data = {}
 
-# Состояния для ConversationHandler
-EDIT_GROUPS, EDIT_PHOTO, EDIT_TEXT, CONFIRM_SEND = range(4)
+EDIT_GROUPS, EDIT_PHOTO = range(2)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -25,9 +23,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет!\n"
         "Отправь мне ссылки на группы (через пробел), куда хочешь рассылать посты.\n"
-        "После этого отправь фото с подписью (текст поста).\n"
-        "Команда /preview — показать текущий пост и группы.\n"
-        "Команда /send — отправить пост."
+        "После этого отправь фото с подписью.\n"
+        "Когда всё будет готово, отправь /preview для просмотра и отправки."
     )
 
 async def groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -36,16 +33,15 @@ async def groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     links = text.split()
 
     valid_chat_ids = set()
-    failed = []
     for link in links:
         try:
             chat = await context.bot.get_chat(link)
             valid_chat_ids.add(chat.id)
-        except Exception as e:
-            failed.append(link)
+        except Exception:
+            await update.message.reply_text(f"Не удалось получить чат по ссылке: {link}")
 
     if not valid_chat_ids:
-        await update.message.reply_text("Не удалось получить ни одной группы. Отправь правильные ссылки.")
+        await update.message.reply_text("Не удалось получить ни одной группы. Попробуй ещё раз.")
         return EDIT_GROUPS
 
     user_data[user_id]['groups'] = valid_chat_ids
@@ -57,12 +53,11 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.photo:
         await update.message.reply_text("Пожалуйста, отправь фото с подписью.")
         return EDIT_PHOTO
+
     photo = update.message.photo[-1]
     caption = update.message.caption or ""
-
     user_data[user_id]['photo'] = photo.file_id
     user_data[user_id]['caption'] = caption
-
     await update.message.reply_text("Фото и подпись сохранены.")
     return ConversationHandler.END
 
@@ -70,7 +65,7 @@ async def preview_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = user_data.get(user_id)
     if not data:
-        await update.message.reply_text("Данные ещё не заданы. Используй /start.")
+        await update.message.reply_text("Данные не найдены. Используй /start.")
         return
     if not data['groups']:
         await update.message.reply_text("Группы не заданы. Отправь ссылки на группы.")
@@ -88,7 +83,7 @@ async def preview_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 groups_links.append(f"chat_id: {gid}")
         except Exception:
-            groups_links.append(f"chat_id: {gid} (не доступен)")
+            groups_links.append(f"chat_id: {gid} (недоступен)")
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("Изменить группы", callback_data='edit_groups')],
@@ -115,7 +110,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_caption(caption="Отправь новое фото с подписью:")
         return EDIT_PHOTO
     elif query.data == 'send_post':
-        # Отправляем пост во все группы
         data = user_data.get(user_id)
         if not data:
             await query.edit_message_text("Данные не найдены. Используй /start.")
@@ -127,21 +121,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_photo(gid, photo=data['photo'], caption=data['caption'])
                 sent += 1
             except Exception as e:
-                errors.append(f"Ошибка при отправке в {gid}: {e}")
+                errors.append(f"Ошибка в {gid}: {e}")
 
         text = f"Пост отправлен в {sent} групп."
         if errors:
             text += "\nОшибки:\n" + "\n".join(errors)
         await query.edit_message_text(text)
-        # Очистить данные
         user_data.pop(user_id, None)
         return ConversationHandler.END
     elif query.data == 'cancel':
-        await query.edit_message_text("Отмена. Используй /start чтобы начать заново.")
+        await query.edit_message_text("Отмена.")
         return ConversationHandler.END
 
 async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Действие отменено. Используй /start чтобы начать заново.")
+    await update.message.reply_text("Действие отменено.")
     return ConversationHandler.END
 
 def main():
@@ -149,8 +142,6 @@ def main():
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start),
-                      CommandHandler('groups', groups_handler),
-                      MessageHandler(filters.PHOTO, photo_handler),
                       CommandHandler('preview', preview_handler)],
         states={
             EDIT_GROUPS: [MessageHandler(filters.TEXT & ~filters.COMMAND, groups_handler)],
@@ -163,16 +154,7 @@ def main():
     app.add_handler(conv_handler)
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    app.add_handler(CommandHandler("send", preview_handler))  # чтобы preview был и с /send тоже
-
-    port = PORT
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=BOT_TOKEN,
-        webhook_url=f"https://botgroop-6.onrender.com/{BOT_TOKEN}"
-    )
-
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
