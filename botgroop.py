@@ -160,7 +160,7 @@ def main():
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        url_path=f"webhook/{BOT_TOKEN}"
+        url_path=f"webhook/{BOT_TOKEN}",
         webhook_url=f"{WEBHOOK_URL}/webhook/{BOT_TOKEN}"
     )
 
