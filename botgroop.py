@@ -1,5 +1,5 @@
 import os
-from telegram import Update, InputMediaPhoto
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters,
 )
@@ -10,12 +10,12 @@ logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", "8443"))
 
-# user_id -> set of chat_ids
 user_groups = {}
-# user_id -> {'photo': file_id, 'caption': text}
 user_posts = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.chat.type != 'private':
+        return  # игнорируем не личные чаты
     user_id = update.effective_user.id
     if user_id not in user_groups:
         user_groups[user_id] = set()
@@ -28,6 +28,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.chat.type != 'private':
+        return
     user_id = update.effective_user.id
     text = update.message.text.strip()
     links = text.split()
@@ -49,12 +51,14 @@ async def groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Сохранено {len(valid_chat_ids)} групп для рассылки.")
 
 async def photo_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.chat.type != 'private':
+        return
     user_id = update.effective_user.id
     if not update.message.photo:
         await update.message.reply_text("Пожалуйста, отправь фото с подписью.")
         return
 
-    photo = update.message.photo[-1]  # лучшее качество
+    photo = update.message.photo[-1]
     caption = update.message.caption or ""
 
     user_posts[user_id] = {
@@ -65,6 +69,8 @@ async def photo_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("Пост с фото сохранён. Для рассылки отправь /send.")
 
 async def send_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.chat.type != 'private':
+        return
     user_id = update.effective_user.id
     groups = user_groups.get(user_id)
     post = user_posts.get(user_id)
@@ -91,12 +97,13 @@ async def send_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Пост отправлен в {sent_count} групп.")
 
 async def show_groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.chat.type != 'private':
+        return
     user_id = update.effective_user.id
     groups = user_groups.get(user_id)
     if not groups:
         await update.message.reply_text("Группы не заданы.")
     else:
-        # Чтобы показать ссылки на группы — можно попытаться получить username чата, если есть
         texts = []
         for chat_id in groups:
             try:
@@ -111,6 +118,8 @@ async def show_groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Ваши группы для рассылки:\n" + "\n".join(texts))
 
 async def show_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.chat.type != 'private':
+        return
     user_id = update.effective_user.id
     post = user_posts.get(user_id)
     if not post:
@@ -129,8 +138,9 @@ def main():
     app.add_handler(CommandHandler("groups", show_groups_handler))
     app.add_handler(CommandHandler("post", show_post_handler))
 
-    # Обработчик сообщений с ссылками на группы (если группы еще не заданы)
     async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.message.chat.type != 'private':
+            return
         user_id = update.effective_user.id
         if user_id not in user_groups or not user_groups[user_id]:
             await groups_handler(update, context)
@@ -140,11 +150,8 @@ def main():
             )
 
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_router))
-
-    # Обработчик фото с подписью (пост)
     app.add_handler(MessageHandler(filters.PHOTO & (~filters.COMMAND), photo_post_handler))
 
-    # Запуск webhook
     port = PORT
     app.run_webhook(
         listen="0.0.0.0",
