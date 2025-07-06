@@ -1,69 +1,56 @@
-import os
-import re
-import asyncio
-import logging
-import nest_asyncio
+import os, re, asyncio, logging, nest_asyncio
 from telegram import Update, InputMediaPhoto
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     ContextTypes, filters
 )
-from telegram.error import TelegramError
+from telegram.error import TelegramError, TimedOut, BadRequest
 
-nest_asyncio.apply()                          # ← патчим loop для Render
+nest_asyncio.apply()
 
 BOT_TOKEN   = os.getenv("BOT_TOKEN")
-PORT        = int(os.getenv("PORT", 8443))    # Render передаёт PORT автоматически
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")        # https://…onrender.com/webhook
-URL_PATH    = "webhook"                       # то, что после «/» в WEBHOOK_URL
+PORT        = int(os.getenv("PORT", 8443))
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")               # https://…onrender.com/webhook
+URL_PATH    = "webhook"
 
-# ──────────── вспом-функции ──────────────────────────────────────────────────
 LINK_RE = re.compile(r"(https?://t\.me/[^\s]+|@[\w\d_]+)", re.IGNORECASE)
+user_data_store: dict[int, dict] = {}
+
 def extract_targets(text: str) -> list[str]:
     links = LINK_RE.findall(text)
     out = []
     for raw in links:
-        if raw.startswith("@"):
-            out.append(raw)
-        else:
-            tail = raw.rsplit("/", 1)[-1]
-            out.append(raw if tail.startswith("+") else "@" + tail)
+        tail = raw.rsplit("/", 1)[-1] if raw.startswith("http") else raw
+        out.append(raw if tail.startswith("+") else ("@" + tail.lstrip("@")))
     return out
 
-# хранение данных между сообщениями (в RAM)
-user_data_store: dict[int, dict] = {}
-
-# ──────────── handlers ───────────────────────────────────────────────────────
+# ──────────── handlers ────────────────────────────────────────────────────────
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Привет! Я бот-рассыльщик.\n"
-        "1) пришли фото/текст\n"
-        "2) /addgroups <@ссылки или t.me/…>\n"
-        "3) /send — отправка"
+        "1. Пришли фото/текст\n"
+        "2. /addgroups <@ссылки или t.me/…>\n"
+        "3. /send — разослать"
     )
 
 async def add_groups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid   = update.effective_user.id
-    links = extract_targets(update.message.text)
-    if not links:
-        await update.message.reply_text("⚠️ Не нашёл групп.")
-        return
+    uid, text = update.effective_user.id, update.message.text
+    targets = extract_targets(text)
+    if not targets:
+        return await update.message.reply_text("⚠️ Не нашёл групп.")
 
     store = user_data_store.setdefault(uid, {"photos": [], "text": "", "groups": []})
     ok, bad = [], []
-    for tgt in links:
+    for tgt in targets:
         try:
             chat = await (ctx.bot.join_chat(tgt) if tgt.startswith("https://t.me/+")
                           else ctx.bot.get_chat(tgt))
             member = await ctx.bot.get_chat_member(chat.id, ctx.bot.id)
             if member.status in ("left", "kicked"):
-                raise ValueError("бот не в группе")
-        except TelegramError as e:
-            bad.append(f"{tgt} ({e.message})")
-            continue
-        except Exception as e:
-            bad.append(f"{tgt} ({e})")
-            continue
+                raise ValueError("бот не состоит в группе")
+        except (TelegramError, Exception) as e:
+            bad.append(f"{tgt} ({e})"); continue
+
         if chat.id not in store["groups"]:
             store["groups"].append(chat.id)
         ok.append(chat.title or chat.username or str(chat.id))
@@ -80,6 +67,9 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📸 Фото сохранено.")
 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # апдейты без текста (service, sticker, и т.п.) отфильтровываем
+    if not (update.message and update.message.text):
+        return
     if update.message.text.startswith("/"):
         return
     uid = update.effective_user.id
@@ -88,14 +78,12 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✏️ Текст сохранён.")
 
 async def send_post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid  = update.effective_user.id
+    uid = update.effective_user.id
     data = user_data_store.get(uid)
     if not data or (not data["photos"] and not data["text"]):
-        await update.message.reply_text("⚠️ Нет контента.")
-        return
+        return await update.message.reply_text("⚠️ Нет контента.")
     if not data["groups"]:
-        await update.message.reply_text("⚠️ Сначала /addgroups.")
-        return
+        return await update.message.reply_text("⚠️ Сначала /addgroups.")
 
     errors = []
     for gid in data["groups"]:
@@ -105,38 +93,42 @@ async def send_post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 media[0].caption = data["text"]
                 await ctx.bot.send_media_group(gid, media)
             else:
-                await ctx.bot.send_photo(gid, photo=data["photos"][0], caption=data["text"])
-        except TelegramError as e:
-            errors.append(f"{gid}: {e.message}")
-        except Exception as e:
+                await ctx.bot.send_photo(gid, data["photos"][0], caption=data["text"])
+        except (TelegramError, Exception) as e:
             errors.append(f"{gid}: {e}")
 
     await update.message.reply_text(
-        "✅ Разослано!" if not errors else "Часть групп не приняла:\n" + "\n".join(errors)
+        "✅ Разослано!" if not errors else "Некуда отправить:\n" + "\n".join(errors)
     )
     user_data_store.pop(uid, None)
+
+# глобальный логгер ошибок — чтобы бот не падал
+async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    logging.exception("Unhandled exception while processing update:", exc_info=ctx.error)
 
 # ──────────── main ───────────────────────────────────────────────────────────
 async def main():
     logging.basicConfig(level=logging.INFO)
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    builder = ApplicationBuilder().token(BOT_TOKEN)
+    # увеличиваем таймауты до 20 сек
+    builder = builder.http_version("1.1").connect_timeout(10).read_timeout(20)
+    app = builder.build()
 
-    app.add_handler(CommandHandler("start",      start))
-    app.add_handler(CommandHandler("addgroups",  add_groups))
-    app.add_handler(CommandHandler("send",       send_post))
-    app.add_handler(MessageHandler(filters.PHOTO,                 handle_photo))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("addgroups", add_groups))
+    app.add_handler(CommandHandler("send",  send_post))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_error_handler(error_handler)
 
-    # 1) регистрируем webhook (делать до run_webhook)
     await app.bot.set_webhook(WEBHOOK_URL)
     print("🤖 Webhook зарегистрирован:", WEBHOOK_URL)
 
-    # 2) запускаем aiohttp-сервер PTB
     await app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        url_path=URL_PATH,      # ← правильное имя параметра!
+        url_path=URL_PATH,           # ← ключевой фикс
         webhook_url=WEBHOOK_URL
     )
 
