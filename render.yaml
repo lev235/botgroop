@@ -1,10 +1,7 @@
 services:
   - type: web
-    name: tg-poster-bot
+    name: botgroop
     env: python
-    plan: free
-    buildCommand: pip3 install python-telegram-bot==20.7
-    startCommand: python3 botgroop.py
-    envVars:
-      - key: 8178775990:AAGGwrAEHAnWRvfbUrnpRbhWHfJjHDPOf1w  # зададим в UI как secret
-        sync: false
+    buildCommand: pip install python-telegram-bot==20.7
+    startCommand: python botgroop.py
+    pythonVersion: "3.12.3"
