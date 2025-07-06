@@ -21,23 +21,32 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")          # https://<render-url>
 PORT        = int(os.getenv("PORT", 10000))     # Render даёт 10000
 
 # ─────────────────────────────────────────────────────────
-user_groups: dict[int, list[int]] = {}           # список chat_id (числа!)
-user_posts : dict[int, dict | None] = {}         # {'photo_file_id', 'caption'}
-user_states: dict[int, str | None] = {}          # None / edit_groups / edit_post
+user_groups: dict[int, list[int]] = {}          # chat_id-ы групп
+user_posts : dict[int, dict | None] = {}        # {'photo_file_id', 'caption'}
+user_states: dict[int, str | None] = {}         # None / edit_groups / edit_post
 # ─────────────────────────────────────────────────────────
 
+# ╭─ helpers ─────────────────────────────────────────────╮
+LINK_RE = re.compile(r"(https?://t\.me/[^\s]+|@[\w\d_]+)", re.I)
 
-# ─── helpers ─────────────────────────────────────────────
-LINK_RE = re.compile(r"(?:https?://)?t\.me/([\w\d_]+)|@([\w\d_]+)", re.I)
-
-def parse_links(text: str) -> list[str]:
-    """Возвращает список username из текста"""
-    usernames = []
-    for m in LINK_RE.finditer(text):
-        name = m.group(1) or m.group(2)
-        usernames.append(name)
-    return usernames
-# ─────────────────────────────────────────────────────────
+def extract_targets(text: str) -> list[str]:
+    """
+    Принимает любое сообщение пользователя, возвращает «цели»:
+    •  https://t.me/username  →  @username
+    •  @username              →  @username
+    •  https://t.me/+abcdef   →  https://t.me/+abcdef   (инвайт-ссылка)
+    """
+    out = []
+    for raw in LINK_RE.findall(text):
+        if raw.startswith("@"):
+            out.append(raw)                   # уже username
+        elif raw.startswith("https://t.me/+"):
+            out.append(raw)                   # инвайт-ссылка оставляем как есть
+        else:                                 # обычная https://t.me/username
+            tail = raw.rsplit("/", 1)[-1]
+            out.append("@" + tail)
+    return out
+# ╰───────────────────────────────────────────────────────╯
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -51,13 +60,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "👋 Привет!\n"
-        "1️⃣ Пришли публичные ссылки на группы (через пробел / строку).\n"
+        "1️⃣ Пришли публичные ссылки на группы.\n"
         "2️⃣ Пришли фото с подписью – это будет пост.\n"
         "3️⃣ /send – разослать.\n\n"
         "🛠 Кнопки «Изменить» появятся после первого ввода."
     )
 
 
+# ╭─ НОВЫЙ groups_handler ───────────────────────────────╮
 async def groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None or update.message.chat.type != "private":
         return
@@ -66,31 +76,41 @@ async def groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_states.get(uid) not in ("edit_groups", None) and user_groups.get(uid):
         return
 
-    usernames = parse_links(update.message.text)
-    if not usernames:
-        await update.message.reply_text("⚠️ Не найдено валидных ссылок на группы.")
+    targets = extract_targets(update.message.text)
+    if not targets:
+        await update.message.reply_text("⚠️ Я не нашёл ни одной ссылки или @юзернейма.")
         return
 
-    chat_ids = []
-    errors = []
+    chat_ids, added, failed = [], [], []
 
-    # Чтобы не добавлять дубли
-    seen_usernames = set()
-
-    for username in usernames:
-        username = username.lstrip("@")  # на всякий случай убираем @
-        if username in seen_usernames:
-            continue
-        seen_usernames.add(username)
-
+    for tgt in targets:
         try:
-            chat = await context.bot.get_chat(username)
-            chat_ids.append(chat.id)
+            # 1) инвайт-ссылка → пробуем вступить
+            if tgt.startswith("https://t.me/+"):
+                chat = await context.bot.join_chat(tgt)
+            else:
+                # 2) обычный @username  /  числовой chat_id
+                chat = await context.bot.get_chat(tgt)
+
+            # проверяем, что бот уже состоит и не забанен
+            member = await context.bot.get_chat_member(chat.id, context.bot.id)
+            if member.status in ("left", "kicked"):
+                raise ValueError("Бот не состоит в группе")
+
         except TelegramError as e:
-            errors.append(f"https://t.me/{username}: {e}")
+            failed.append(f"{tgt} ({e.message})")
+            continue
+        except Exception as e:
+            failed.append(f"{tgt} ({e})")
+            continue
+
+        chat_ids.append(chat.id)
+        added.append(chat.title or chat.username or str(chat.id))
 
     if not chat_ids:
         await update.message.reply_text("❌ Не удалось сохранить ни одну группу.")
+        if failed:
+            await update.message.reply_text("⚠️ Причины:\n" + "\n".join(failed))
         return
 
     user_groups[uid] = chat_ids
@@ -100,13 +120,17 @@ async def groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("✏️ Изменить группы", callback_data="edit_groups")
     )
     await update.message.reply_text(
-        f"✅ Сохранено групп: {len(chat_ids)}", reply_markup=kb
+        f"✅ Добавил: {', '.join(added)}", reply_markup=kb
     )
+    if failed:
+        await update.message.reply_text(
+            "⚠️ Не удалось:\n" + "\n".join(failed) +
+            "\nУбедитесь, что бот добавлен в группы и имеет права."
+        )
+# ╰───────────────────────────────────────────────────────╯
 
-    if errors:
-        await update.message.reply_text("⚠️ Ошибки:\n" + "\n".join(errors))
 
-
+# ─── photo / send / show / buttons  (без изменений) ────
 async def photo_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None or update.message.chat.type != "private":
         return
@@ -114,7 +138,6 @@ async def photo_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if user_states.get(uid) not in ("edit_post", None) and user_posts.get(uid):
         return
-
     if not update.message.photo:
         return
 
@@ -144,7 +167,7 @@ async def send_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "▶️ Отправляю пост в:\n" + "\n".join([str(g) for g in groups])
+        "▶️ Отправляю пост в:\n" + "\n".join(map(str, groups))
     )
 
     sent, errors = 0, []
@@ -156,8 +179,8 @@ async def send_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption=post["caption"]
             )
             sent += 1
-        except Exception as e:
-            errors.append(f"{chat_id}: {e}")
+        except TelegramError as e:
+            errors.append(f"{chat_id}: {e.message}")
 
     await update.message.reply_text(f"✅ Отправлено: {sent}")
     if errors:
@@ -209,7 +232,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("Пришлите новое фото с подписью.")
 
 
-# ─── main / webhook ──────────────────────────────────────
+# ─── main / webhook ─────────────────────────────────────
 def main() -> None:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
