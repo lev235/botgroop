@@ -68,11 +68,21 @@ async def groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     usernames = parse_links(update.message.text)
     if not usernames:
+        await update.message.reply_text("⚠️ Не найдено валидных ссылок на группы.")
         return
 
     chat_ids = []
     errors = []
+
+    # Чтобы не добавлять дубли
+    seen_usernames = set()
+
     for username in usernames:
+        username = username.lstrip("@")  # на всякий случай убираем @
+        if username in seen_usernames:
+            continue
+        seen_usernames.add(username)
+
         try:
             chat = await context.bot.get_chat(username)
             chat_ids.append(chat.id)
