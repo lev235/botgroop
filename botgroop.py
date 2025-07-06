@@ -1,201 +1,205 @@
+
+# botgroop.py
 import os
+import re
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+)
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler,
-    MessageHandler, ContextTypes, filters,
-    CallbackQueryHandler,
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    CallbackQueryHandler, ContextTypes, filters,
 )
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Например, https://yourdomain.com
-PORT = int(os.getenv("PORT", 10000))
+BOT_TOKEN   = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")          # https://<render-url>
+PORT        = int(os.getenv("PORT", 10000))     # Render даёт 10000
 
-user_groups = {}
-user_posts = {}
-user_states = {}  # храним состояние пользователя: None, "edit_groups", "edit_post"
+# ─────────────────────────────────────────────────────────
+user_groups: dict[int, list[str]] = {}          # ссылки-группы
+user_posts : dict[int, dict | None] = {}        # {'photo_file_id', 'caption'}
+user_states: dict[int, str | None] = {}         # None / edit_groups / edit_post
+# ─────────────────────────────────────────────────────────
+
+
+# ─── helpers ─────────────────────────────────────────────
+LINK_RE = re.compile(r"(?:https?://)?t\.me/([\w\d_]+)|@([\w\d_]+)", re.I)
+
+def parse_links(text: str) -> list[str]:
+    """Возвращает список ссылок https://t.me/<username> из произвольного текста"""
+    links = []
+    for m in LINK_RE.finditer(text):
+        name = m.group(1) or m.group(2)
+        links.append(f"https://t.me/{name}")
+    return links
+# ─────────────────────────────────────────────────────────
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type != "private":
         return
-    user_id = update.effective_user.id
-    user_groups.setdefault(user_id, [])
-    user_posts.setdefault(user_id, None)
-    user_states[user_id] = None
+    uid = update.effective_user.id
+
+    user_groups.setdefault(uid, [])
+    user_posts.setdefault(uid, None)
+    user_states[uid] = "edit_groups"            # ← сразу ждём ссылки!
+
     await update.message.reply_text(
-        "Привет!\n"
-        "Отправь ссылки на публичные группы вида https://t.me/username или @username через пробел.\n"
-        "Затем отправь фото с подписью — это будет пост.\n"
-        "Команда /send отправит пост во все выбранные группы.\n"
-        "Команда /groups покажет текущие группы.\n"
-        "Команда /post покажет текущий сохранённый пост."
+        "👋 Привет!\n"
+        "1️⃣ Пришли публичные ссылки на группы (через пробел / строку).\n"
+        "2️⃣ Пришли фото с подписью – это будет пост.\n"
+        "3️⃣ /send – разослать.\n\n"
+        "🛠 Кнопки «Изменить» появятся после первого ввода."
     )
+
 
 async def groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type != "private":
         return
-    user_id = update.effective_user.id
+    uid = update.effective_user.id
 
-    # Если пользователь не в режиме редактирования групп, игнорируем
-    if user_states.get(user_id) != "edit_groups":
+    # Обрабатываем, если:
+    #  ─ пользователь в режиме редактирования групп
+    #  ─ или групп ещё нет (первый ввод после /start)
+    if user_states.get(uid) not in ("edit_groups", None) and user_groups.get(uid):
         return
 
-    text = update.message.text.strip()
-    links = text.split()
-    valid_links = []
-    errors = []
+    links = parse_links(update.message.text)
+    if not links:
+        return                                       # это не ссылки – игнорируем
 
-    for link in links:
-        if link.startswith("https://t.me/"):
-            valid_links.append(link)
-        elif link.startswith("@"):
-            valid_links.append("https://t.me/" + link[1:])
-        else:
-            errors.append(f"Неверный формат ссылки: {link}")
+    user_groups[uid] = links
+    user_states[uid] = None                          # вышли из edit_groups
 
-    if valid_links:
-        user_groups[user_id] = valid_links
-        user_states[user_id] = None  # выход из режима редактирования
-        keyboard = InlineKeyboardMarkup.from_button(
-            InlineKeyboardButton("Изменить группы", callback_data="edit_groups")
-        )
-        await update.message.reply_text(
-            f"Сохранено {len(valid_links)} групп.",
-            reply_markup=keyboard,
-        )
-    else:
-        await update.message.reply_text("Не удалось сохранить ни одной ссылки.")
+    kb = InlineKeyboardMarkup.from_button(
+        InlineKeyboardButton("✏️ Изменить группы", callback_data="edit_groups")
+    )
+    await update.message.reply_text(
+        f"✅ Сохранено групп: {len(links)}",
+        reply_markup=kb,
+    )
 
-    if errors:
-        await update.message.reply_text("\n".join(errors))
 
 async def photo_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type != "private":
         return
-    user_id = update.effective_user.id
+    uid = update.effective_user.id
 
-    # Проверяем, что пользователь в режиме редактирования поста
-    if user_states.get(user_id) != "edit_post":
+    # принимаем фото, если пользователь в edit_post или поста ещё нет
+    if user_states.get(uid) not in ("edit_post", None) and user_posts.get(uid):
         return
 
     if not update.message.photo:
-        await update.message.reply_text("Пожалуйста, отправь фото с подписью.")
         return
 
     photo = update.message.photo[-1]
     caption = update.message.caption or ""
+    user_posts[uid] = {"photo_file_id": photo.file_id, "caption": caption}
+    user_states[uid] = None
 
-    user_posts[user_id] = {
-        "photo_file_id": photo.file_id,
-        "caption": caption
-    }
-    user_states[user_id] = None  # выход из режима редактирования
-
-    keyboard = InlineKeyboardMarkup.from_button(
-        InlineKeyboardButton("Изменить пост", callback_data="edit_post")
+    kb = InlineKeyboardMarkup.from_button(
+        InlineKeyboardButton("✏️ Изменить пост", callback_data="edit_post")
     )
+    await update.message.reply_text("📸 Пост сохранён.", reply_markup=kb)
 
-    await update.message.reply_text("Пост с фото сохранён.", reply_markup=keyboard)
 
 async def send_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type != "private":
         return
-    user_id = update.effective_user.id
-    groups = user_groups.get(user_id)
-    post = user_posts.get(user_id)
+    uid = update.effective_user.id
+    groups = user_groups.get(uid) or []
+    post   = user_posts.get(uid)
 
     if not groups:
-        await update.message.reply_text("Сначала отправь ссылки на группы для рассылки.")
+        await update.message.reply_text("⚠️ Сначала пришли ссылки на группы.")
         return
     if not post:
-        await update.message.reply_text("Сначала отправь фото с подписью для рассылки.")
+        await update.message.reply_text("⚠️ Сначала пришли фото с подписью.")
         return
 
-    groups_text = "\n".join(groups)
     await update.message.reply_text(
-        f"Пост будет отправлен в следующие группы:\n{groups_text}\n\nОтправляем..."
+        "▶️ Отправляю пост в:\n" + "\n".join(groups)
     )
 
-    sent_count = 0
-    errors = []
-    for chat_link in groups:
-        chat_id = chat_link.replace("https://t.me/", "@")
+    sent, errors = 0, []
+    for link in groups:
         try:
             await context.bot.send_photo(
-                chat_id=chat_id,
+                chat_id=link,                       # PTB примет ссылку
                 photo=post["photo_file_id"],
-                caption=post["caption"],
+                caption=post["caption"]
             )
-            sent_count += 1
+            sent += 1
         except Exception as e:
-            errors.append(f"Ошибка при отправке в {chat_link}: {e}")
+            errors.append(f"{link}: {e}")
 
-    await update.message.reply_text(f"Пост отправлен в {sent_count} групп.")
+    await update.message.reply_text(f"✅ Отправлено: {sent}")
     if errors:
-        await update.message.reply_text("Ошибки:\n" + "\n".join(errors))
+        await update.message.reply_text("❌ Ошибки:\n" + "\n".join(errors))
 
-async def show_groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def show_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type != "private":
         return
-    user_id = update.effective_user.id
-    groups = user_groups.get(user_id)
-    if not groups:
-        await update.message.reply_text("Группы не заданы.")
-        return
+    uid = update.effective_user.id
+    groups = user_groups.get(uid) or []
 
-    keyboard = InlineKeyboardMarkup.from_button(
-        InlineKeyboardButton("Изменить группы", callback_data="edit_groups")
+    kb = InlineKeyboardMarkup.from_button(
+        InlineKeyboardButton("✏️ Изменить группы", callback_data="edit_groups")
     )
+    text = "Группы не заданы." if not groups else "Ваши группы:\n" + "\n".join(groups)
+    await update.message.reply_text(text, reply_markup=kb)
 
-    await update.message.reply_text(
-        "Ваши группы для рассылки:\n" + "\n".join(groups),
-        reply_markup=keyboard,
-    )
 
-async def show_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type != "private":
         return
-    user_id = update.effective_user.id
-    post = user_posts.get(user_id)
+    uid = update.effective_user.id
+    post = user_posts.get(uid)
     if not post:
         await update.message.reply_text("Пост ещё не сохранён.")
         return
 
-    keyboard = InlineKeyboardMarkup.from_button(
-        InlineKeyboardButton("Изменить пост", callback_data="edit_post")
+    kb = InlineKeyboardMarkup.from_button(
+        InlineKeyboardButton("✏️ Изменить пост", callback_data="edit_post")
+    )
+    await update.message.reply_photo(
+        photo=post["photo_file_id"], caption=post["caption"], reply_markup=kb
     )
 
-    await update.message.reply_photo(photo=post["photo_file_id"], caption=post["caption"], reply_markup=keyboard)
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
 
-    user_id = query.from_user.id
+    if q.data == "edit_groups":
+        user_states[uid] = "edit_groups"
+        await q.message.reply_text("Введите новые ссылки на группы (через пробел / строку).")
+    elif q.data == "edit_post":
+        user_states[uid] = "edit_post"
+        await q.message.reply_text("Пришлите новое фото с подписью.")
 
-    if query.data == "edit_groups":
-        await query.message.reply_text("Отправьте новые ссылки на группы для рассылки (через пробел).")
-        user_states[user_id] = "edit_groups"
-    elif query.data == "edit_post":
-        await query.message.reply_text("Отправьте новое фото с подписью для рассылки.")
-        user_states[user_id] = "edit_post"
 
-def main():
+# ─── main / webhook ──────────────────────────────────────
+def main() -> None:
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("send", send_handler))
-    app.add_handler(CommandHandler("groups", show_groups_handler))
-    app.add_handler(CommandHandler("post", show_post_handler))
+    app.add_handler(CommandHandler("start",  start))
+    app.add_handler(CommandHandler("send",   send_handler))
+    app.add_handler(CommandHandler("groups", show_groups))
+    app.add_handler(CommandHandler("post",   show_post))
 
-    # Обработчики с проверкой состояний:
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), groups_handler))
-    app.add_handler(MessageHandler(filters.PHOTO & (~filters.COMMAND), photo_post_handler))
+    app.add_handler(MessageHandler(filters.TEXT  & ~filters.COMMAND,  groups_handler))
+    app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND,  photo_post_handler))
+    app.add_handler(CallbackQueryHandler(buttons))
 
-    app.add_handler(CallbackQueryHandler(button_handler))
-
+    # WebHook
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
