@@ -1,204 +1,157 @@
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+import os
+from telegram import Update, InputMediaPhoto
 from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    CallbackQueryHandler,
-    filters,
+    ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters,
 )
+import logging
 
-# Словарь пользователей и их данных:
-# user_id -> {"username": str, "groups": {chat_id: group_name}, "post": {"text": str, "photo": file_id}}
-users_data = {}
+logging.basicConfig(level=logging.INFO)
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+PORT = int(os.getenv("PORT", "8443"))
+
+# user_id -> set of chat_ids
+user_groups = {}
+# user_id -> {'photo': file_id, 'caption': text}
+user_posts = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = user.id
-    username = user.username or user.first_name
-
-    if user_id not in users_data:
-        users_data[user_id] = {"username": username, "groups": {}, "post": {}}
-        await update.message.reply_text(
-            f"Привет, {username}! Ты зарегистрирован.\n"
-            "Добавь свои группы командой /addgroup <chat_id>.\n"
-            "Например: /addgroup -1001234567890"
-        )
-    else:
-        await update.message.reply_text(
-            f"Привет, {username}! Ты уже зарегистрирован.\n"
-            "Добавляй группы командой /addgroup <chat_id>.\n"
-            "Посмотреть группы — /groups"
-        )
-
-async def addgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
-    if user_id not in users_data:
-        await update.message.reply_text("Сначала отправь /start для регистрации.")
-        return
-
-    args = context.args
-    if not args:
-        await update.message.reply_text("Пожалуйста, укажи ID группы. Например:\n/addgroup -1001234567890")
-        return
-
-    chat_id_str = args[0]
-    try:
-        chat_id = int(chat_id_str)
-    except ValueError:
-        await update.message.reply_text("ID группы должен быть числом, начинающимся с минуса, например -1001234567890.")
-        return
-
-    # Можно попытаться получить название группы через API, но проще попросить указать вручную
-    # Для упрощения запросим название группы у пользователя
-    users_data[user_id]["groups"][chat_id] = "Группа без названия"
-
+    if user_id not in user_groups:
+        user_groups[user_id] = set()
+        user_posts[user_id] = None
     await update.message.reply_text(
-        f"Группа с ID {chat_id} добавлена.\n"
-        "Чтобы задать название группы, отправь команду:\n"
-        f"/setgroupname {chat_id} <название>"
+        "Привет!\n"
+        "Отправь мне ссылки на группы (через пробел), куда хочешь рассылать посты.\n"
+        "После этого отправь фото с подписью (текст поста).\n"
+        "Команда /send отправит твой пост во все выбранные группы."
     )
 
-async def setgroupname(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id not in users_data:
-        await update.message.reply_text("Сначала отправь /start для регистрации.")
+    text = update.message.text.strip()
+    links = text.split()
+
+    valid_chat_ids = set()
+    for link in links:
+        try:
+            chat = await context.bot.get_chat(link)
+            valid_chat_ids.add(chat.id)
+        except Exception as e:
+            await update.message.reply_text(f"Не удалось получить чат по ссылке: {link}")
+            logging.warning(f"User {user_id} invalid chat link {link}: {e}")
+
+    if not valid_chat_ids:
+        await update.message.reply_text("Не удалось получить ни одной группы по ссылкам. Отправь правильные ссылки.")
         return
 
-    args = context.args
-    if len(args) < 2:
-        await update.message.reply_text("Использование:\n/setgroupname <chat_id> <название группы>")
-        return
+    user_groups[user_id] = valid_chat_ids
+    await update.message.reply_text(f"Сохранено {len(valid_chat_ids)} групп для рассылки.")
 
-    try:
-        chat_id = int(args[0])
-    except ValueError:
-        await update.message.reply_text("ID группы должен быть числом.")
-        return
-
-    name = " ".join(args[1:])
-    if chat_id not in users_data[user_id]["groups"]:
-        await update.message.reply_text("У тебя нет такой группы. Добавь сначала /addgroup.")
-        return
-
-    users_data[user_id]["groups"][chat_id] = name
-    await update.message.reply_text(f"Название группы с ID {chat_id} установлено: {name}")
-
-async def groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def photo_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id not in users_data or not users_data[user_id]["groups"]:
-        await update.message.reply_text("У тебя ещё нет добавленных групп. Добавь с помощью /addgroup.")
+    if not update.message.photo:
+        await update.message.reply_text("Пожалуйста, отправь фото с подписью.")
         return
 
-    msg = "Твои группы:\n"
-    for chat_id, name in users_data[user_id]["groups"].items():
-        msg += f"{chat_id} — {name}\n"
-    await update.message.reply_text(msg)
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text
-
-    if user_id not in users_data:
-        await update.message.reply_text("Сначала отправь /start для регистрации.")
-        return
-
-    users_data[user_id]["post"]["text"] = text
-    users_data[user_id]["post"].pop("photo", None)  # если было фото, удаляем
-
-    await update.message.reply_text("Текст сохранён. Теперь отправь /send для рассылки.")
-
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    photo = update.message.photo[-1]
+    photo = update.message.photo[-1]  # лучшее качество
     caption = update.message.caption or ""
 
-    if user_id not in users_data:
-        await update.message.reply_text("Сначала отправь /start для регистрации.")
-        return
+    user_posts[user_id] = {
+        "photo_file_id": photo.file_id,
+        "caption": caption
+    }
 
-    users_data[user_id]["post"]["photo"] = photo.file_id
-    users_data[user_id]["post"]["text"] = caption
+    await update.message.reply_text("Пост с фото сохранён. Для рассылки отправь /send.")
 
-    await update.message.reply_text("Фото и подпись сохранены. Отправь /send для рассылки.")
-
-async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def send_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    groups = user_groups.get(user_id)
+    post = user_posts.get(user_id)
 
-    if user_id not in users_data:
-        await update.message.reply_text("Сначала отправь /start для регистрации.")
-        return
-
-    post = users_data[user_id]["post"]
-    if not post:
-        await update.message.reply_text("У тебя нет сохранённого поста. Отправь текст или фото с подписью.")
-        return
-
-    groups = users_data[user_id]["groups"]
     if not groups:
-        await update.message.reply_text("У тебя нет добавленных групп. Добавь с помощью /addgroup.")
+        await update.message.reply_text("Сначала отправь ссылки на группы для рассылки.")
         return
-
-    buttons = [
-        [InlineKeyboardButton(name, callback_data=str(chat_id))]
-        for chat_id, name in groups.items()
-    ]
-    keyboard = InlineKeyboardMarkup(buttons)
-    await update.message.reply_text("Выбери группу для отправки:", reply_markup=keyboard)
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
-    chat_id = int(query.data)
-
-    await query.answer()
-
-    if user_id not in users_data:
-        await query.edit_message_text("Ты не зарегистрирован. Отправь /start.")
-        return
-
-    post = users_data[user_id]["post"]
     if not post:
-        await query.edit_message_text("Пост не найден. Отправь текст или фото.")
+        await update.message.reply_text("Сначала отправь фото с подписью для рассылки.")
         return
 
-    try:
-        if "photo" in post:
-            await context.bot.send_photo(chat_id=chat_id, photo=post["photo"], caption=post.get("text", ""))
-        else:
-            await context.bot.send_message(chat_id=chat_id, text=post.get("text", ""))
-        await query.edit_message_text("✅ Пост отправлен.")
-        users_data[user_id]["post"] = {}
-    except Exception as e:
-        await query.edit_message_text(f"Ошибка при отправке: {e}")
+    sent_count = 0
+    for chat_id in groups:
+        try:
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=post["photo_file_id"],
+                caption=post["caption"]
+            )
+            sent_count += 1
+        except Exception as e:
+            logging.error(f"Ошибка при отправке в группу {chat_id}: {e}")
 
-async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Неизвестная команда.")
+    await update.message.reply_text(f"Пост отправлен в {sent_count} групп.")
+
+async def show_groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    groups = user_groups.get(user_id)
+    if not groups:
+        await update.message.reply_text("Группы не заданы.")
+    else:
+        # Чтобы показать ссылки на группы — можно попытаться получить username чата, если есть
+        texts = []
+        for chat_id in groups:
+            try:
+                chat = await context.bot.get_chat(chat_id)
+                if chat.username:
+                    link = f"https://t.me/{chat.username}"
+                else:
+                    link = f"chat_id: {chat_id}"
+                texts.append(link)
+            except Exception:
+                texts.append(f"chat_id: {chat_id} (не доступен)")
+        await update.message.reply_text("Ваши группы для рассылки:\n" + "\n".join(texts))
+
+async def show_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    post = user_posts.get(user_id)
+    if not post:
+        await update.message.reply_text("Пост ещё не сохранён.")
+    else:
+        await update.message.reply_photo(
+            photo=post["photo_file_id"],
+            caption=post["caption"]
+        )
 
 def main():
-    TOKEN = "8178775990:AAGGwrAEHAnWRvfbUrnpRbhWHfJjHDPOf1w"
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    application = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("send", send_handler))
+    app.add_handler(CommandHandler("groups", show_groups_handler))
+    app.add_handler(CommandHandler("post", show_post_handler))
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("addgroup", addgroup))
-    application.add_handler(CommandHandler("setgroupname", setgroupname))
-    application.add_handler(CommandHandler("groups", groups))
-    application.add_handler(CommandHandler("send", send_command))
+    # Обработчик сообщений с ссылками на группы (если группы еще не заданы)
+    async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if user_id not in user_groups or not user_groups[user_id]:
+            await groups_handler(update, context)
+        else:
+            await update.message.reply_text(
+                "Группы уже заданы. Чтобы изменить группы, отправь команду /start."
+            )
 
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_router))
 
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
+    # Обработчик фото с подписью (пост)
+    app.add_handler(MessageHandler(filters.PHOTO & (~filters.COMMAND), photo_post_handler))
 
-    print("Бот запущен...")
-    application.run_polling()
+    # Запуск webhook
+    port = PORT
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=BOT_TOKEN,
+        webhook_url=f"https://botgroop-6.onrender.com/{BOT_TOKEN}"
+    )
 
 if __name__ == "__main__":
     main()
