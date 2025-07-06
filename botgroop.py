@@ -16,8 +16,9 @@ from telegram.error import TelegramError
 
 nest_asyncio.apply()
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8178775990:AAGGwrAEHAnWRvfbUrnpRbhWHfJjHDPOf1w")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://botgroop-6.onrender.com/webhook")
+PORT = int(os.environ.get("PORT", 10000))
 
 user_data_store = {}
 
@@ -155,13 +156,12 @@ async def main():
     await app.bot.set_webhook(WEBHOOK_URL)
     print("🤖 Webhook установлен!")
 
+    # просто запускаем webhook-сервер
     await app.run_webhook(
         listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 10000)),
-        webhook_url=WEBHOOK_URL  # ✅ без path
+        port=PORT
     )
 
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
+    asyncio.run(main())
