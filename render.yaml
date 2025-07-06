@@ -2,6 +2,6 @@ services:
   - type: web
     name: botgroop
     env: python
-    buildCommand: pip install python-telegram-bot==20.7
-    startCommand: python botgroop.py
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python botgroop.py"
     pythonVersion: "3.12.3"
