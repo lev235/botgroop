@@ -12,28 +12,19 @@ from telegram.ext import (
     filters,
 )
 from telegram.error import TelegramError
-import nest_asyncio     # ← важно для Render
+import nest_asyncio
 
-nest_asyncio.apply()    # патчим уже работающий event-loop
+nest_asyncio.apply()
 
-# ────────────────────────────
-# ОБЯЗАТЕЛЬНЫЕ переменные окружения (заполняйте в Render → Environment):
-# BOT_TOKEN    — токен бота от @BotFather
-# WEBHOOK_URL  — https://имя-сервиса.onrender.com/webhook
-# ────────────────────────────
-BOT_TOKEN    = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL  = os.environ.get("WEBHOOK_URL")          # полный https-URL
-PORT         = int(os.environ.get("PORT", 8443))     # Render сам задаёт PORT
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # должен оканчиваться на /webhook
+PORT = int(os.getenv("PORT", 8443))
 
-# Память между сообщениями (RAM-store, сбрасывается при рестарте)
 user_data_store: dict[int, dict] = {}
-
-# шаблон ссылок/юзернеймов групп
 LINK_RE = re.compile(r"(https?://t\.me/[^\s]+|@[\w\d_]+)", re.IGNORECASE)
 
 
 def extract_targets(text: str) -> list[str]:
-    """Нормализуем ввёденные ссылки/юзернеймы групп."""
     links = LINK_RE.findall(text)
     normalized = []
     for raw in links:
@@ -45,7 +36,6 @@ def extract_targets(text: str) -> list[str]:
     return normalized
 
 
-# ──────────── Хэндлеры ────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Привет! Я бот для рассылки постов.\n"
@@ -157,18 +147,16 @@ async def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # 1. Регистрируем webhook в API Telegram
     await app.bot.set_webhook(WEBHOOK_URL)
-    print("🤖 Webhook установлен!")
+    print(f"🤖 Webhook установлен: {WEBHOOK_URL}")
 
-    # 2. Запускаем встроенный aiohttp-сервер PTB
     await app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        webhook_url=WEBHOOK_URL
+        webhook_url=WEBHOOK_URL,
+        path="/webhook"  # важно для PTB!
     )
 
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
+    asyncio.run(main())
