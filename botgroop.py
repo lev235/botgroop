@@ -1,20 +1,26 @@
 import os
-import logging
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters,
 )
-from telegram.error import TelegramError
+import logging
 
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", "8443"))
 
-# Хранилища: user_id -> set(chat_id)
 user_groups = {}
-# user_id -> {"photo_file_id": ..., "caption": ...}
 user_posts = {}
+
+def extract_username(link: str) -> str:
+    if link.startswith("https://t.me/"):
+        username = link[len("https://t.me/"):]
+        username = username.lstrip('@').split('/')[0]  # Убираем @ и лишнее после слэша
+        return '@' + username
+    if link.startswith('@'):
+        return link
+    return link  # Если уже chat_id или что-то другое
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type != 'private':
@@ -38,17 +44,13 @@ async def groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     links = text.split()
 
     valid_chat_ids = set()
-    failed_links = []
-
     for link in links:
+        username_or_id = extract_username(link)
         try:
-            chat = await context.bot.get_chat(link)
+            chat = await context.bot.get_chat(username_or_id)
             valid_chat_ids.add(chat.id)
-        except TelegramError as e:
-            failed_links.append(f"{link} ({e.message})")
-            logging.warning(f"User {user_id} invalid chat link {link}: {e}")
         except Exception as e:
-            failed_links.append(f"{link} ({str(e)})")
+            await update.message.reply_text(f"Не удалось получить чат по ссылке: {link}")
             logging.warning(f"User {user_id} invalid chat link {link}: {e}")
 
     if not valid_chat_ids:
@@ -56,13 +58,7 @@ async def groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_groups[user_id] = valid_chat_ids
-
-    msg = f"Сохранено {len(valid_chat_ids)} групп для рассылки."
-    if failed_links:
-        msg += "\n⚠️ Не удалось обработать:\n" + "\n".join(failed_links)
-        msg += "\nУбедись, что бот добавлен в эти группы и имеет права."
-
-    await update.message.reply_text(msg)
+    await update.message.reply_text(f"Сохранено {len(valid_chat_ids)} групп для рассылки.")
 
 async def photo_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type != 'private':
@@ -97,8 +93,6 @@ async def send_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     sent_count = 0
-    failed = []
-
     for chat_id in groups:
         try:
             await context.bot.send_photo(
@@ -107,18 +101,10 @@ async def send_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption=post["caption"]
             )
             sent_count += 1
-        except TelegramError as e:
-            logging.error(f"Ошибка при отправке в группу {chat_id}: {e.message}")
-            failed.append(f"Группа {chat_id}: {e.message}")
         except Exception as e:
             logging.error(f"Ошибка при отправке в группу {chat_id}: {e}")
-            failed.append(f"Группа {chat_id}: {e}")
 
-    reply_msg = f"Пост отправлен в {sent_count} групп."
-    if failed:
-        reply_msg += "\nОшибки при отправке в некоторые группы:\n" + "\n".join(failed)
-
-    await update.message.reply_text(reply_msg)
+    await update.message.reply_text(f"Пост отправлен в {sent_count} групп.")
 
 async def show_groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type != 'private':
@@ -127,20 +113,19 @@ async def show_groups_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     groups = user_groups.get(user_id)
     if not groups:
         await update.message.reply_text("Группы не заданы.")
-        return
-
-    texts = []
-    for chat_id in groups:
-        try:
-            chat = await context.bot.get_chat(chat_id)
-            if chat.username:
-                link = f"https://t.me/{chat.username}"
-            else:
-                link = f"chat_id: {chat_id}"
-            texts.append(link)
-        except Exception:
-            texts.append(f"chat_id: {chat_id} (не доступен)")
-    await update.message.reply_text("Ваши группы для рассылки:\n" + "\n".join(texts))
+    else:
+        texts = []
+        for chat_id in groups:
+            try:
+                chat = await context.bot.get_chat(chat_id)
+                if chat.username:
+                    link = f"https://t.me/{chat.username}"
+                else:
+                    link = f"chat_id: {chat_id}"
+                texts.append(link)
+            except Exception:
+                texts.append(f"chat_id: {chat_id} (не доступен)")
+        await update.message.reply_text("Ваши группы для рассылки:\n" + "\n".join(texts))
 
 async def show_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type != 'private':
@@ -149,12 +134,11 @@ async def show_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     post = user_posts.get(user_id)
     if not post:
         await update.message.reply_text("Пост ещё не сохранён.")
-        return
-
-    await update.message.reply_photo(
-        photo=post["photo_file_id"],
-        caption=post["caption"]
-    )
+    else:
+        await update.message.reply_photo(
+            photo=post["photo_file_id"],
+            caption=post["caption"]
+        )
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -169,7 +153,6 @@ def main():
             return
         user_id = update.effective_user.id
         if user_id not in user_groups or not user_groups[user_id]:
-            # Если группы не заданы — считаем, что текст — это ссылки и пробуем обработать
             await groups_handler(update, context)
         else:
             await update.message.reply_text(
@@ -179,12 +162,13 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_router))
     app.add_handler(MessageHandler(filters.PHOTO & (~filters.COMMAND), photo_post_handler))
 
+    port = PORT
     app.run_webhook(
         listen="0.0.0.0",
-        port=PORT,
+        port=port,
         url_path=BOT_TOKEN,
         webhook_url=f"https://botgroop-6.onrender.com/{BOT_TOKEN}"
     )
 
-if __name__ == "__main__":
+if name == "__main__":
     main()
