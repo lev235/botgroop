@@ -1,7 +1,7 @@
 import os
+import re
 import asyncio
 import logging
-import re
 
 from telegram import Update, InputMediaPhoto
 from telegram.ext import (
@@ -12,16 +12,28 @@ from telegram.ext import (
     filters,
 )
 from telegram.error import TelegramError
+import nest_asyncio     # ← важно для Render
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+nest_asyncio.apply()    # патчим уже работающий event-loop
 
-user_data_store = {}
+# ────────────────────────────
+# ОБЯЗАТЕЛЬНЫЕ переменные окружения (заполняйте в Render → Environment):
+# BOT_TOKEN    — токен бота от @BotFather
+# WEBHOOK_URL  — https://имя-сервиса.onrender.com/webhook
+# ────────────────────────────
+BOT_TOKEN    = os.environ.get("BOT_TOKEN")
+WEBHOOK_URL  = os.environ.get("WEBHOOK_URL")          # полный https-URL
+PORT         = int(os.environ.get("PORT", 10000))     # Render сам задаёт PORT
 
+# Память между сообщениями (RAM-store, сбрасывается при рестарте)
+user_data_store: dict[int, dict] = {}
+
+# шаблон ссылок/юзернеймов групп
 LINK_RE = re.compile(r"(https?://t\.me/[^\s]+|@[\w\d_]+)", re.IGNORECASE)
 
 
 def extract_targets(text: str) -> list[str]:
+    """Нормализуем ввёденные ссылки/юзернеймы групп."""
     links = LINK_RE.findall(text)
     normalized = []
     for raw in links:
@@ -29,25 +41,24 @@ def extract_targets(text: str) -> list[str]:
             normalized.append(raw)
         else:
             tail = raw.rsplit("/", 1)[-1]
-            if tail.startswith("+"):
-                normalized.append(raw)
-            else:
-                normalized.append("@" + tail)
+            normalized.append(raw if tail.startswith("+") else "@" + tail)
     return normalized
 
 
+# ──────────── Хэндлеры ────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Привет! Я бот для рассылки постов.\n"
-        "Пришли фото и текст, а затем:\n"
-        "/addgroups <ссылки или @usernames>\n"
-        "Когда всё готово — напиши /send"
+        "1️⃣ Пришли фото и/или текст.\n"
+        "2️⃣ /addgroups <@ссылки или t.me/…>\n"
+        "3️⃣ /send — разослать пост."
     )
 
 
 async def add_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     targets = extract_targets(update.message.text)
+
     if not targets:
         await update.message.reply_text("⚠️ Я не нашёл ни одной ссылки или @юзернейма.")
         return
@@ -57,10 +68,8 @@ async def add_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for tgt in targets:
         try:
-            if tgt.startswith("https://t.me/+"):
-                chat = await context.bot.join_chat(tgt)
-            else:
-                chat = await context.bot.get_chat(tgt)
+            chat = await (context.bot.join_chat(tgt) if tgt.startswith("https://t.me/+")
+                          else context.bot.get_chat(tgt))
             member = await context.bot.get_chat_member(chat.id, context.bot.id)
             if member.status in ("left", "kicked"):
                 raise ValueError("Бот не состоит в группе")
@@ -73,24 +82,23 @@ async def add_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if chat.id not in store["groups"]:
             store["groups"].append(chat.id)
-        name = chat.title or chat.username or str(chat.id)
-        added.append(name)
+        added.append(chat.title or chat.username or str(chat.id))
 
-    msg = []
+    msgs = []
     if added:
-        msg.append(f"✅ Добавил: {', '.join(added)}")
+        msgs.append(f"✅ Добавил: {', '.join(added)}")
     if failed:
-        msg.append(
-            f"⚠️ Не удалось: {', '.join(failed)}\nУбедитесь, что бот добавлен в группы и имеет права."
+        msgs.append(
+            f"⚠️ Не удалось: {', '.join(failed)}\n"
+            "Убедитесь, что бот добавлен в группы и имеет право писать."
         )
-
-    await update.message.reply_text("\n".join(msg))
+    await update.message.reply_text("\n".join(msgs))
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    store = user_data_store.setdefault(user_id, {"photos": [], "text": "", "groups": []})
     photo_id = update.message.photo[-1].file_id
+    store = user_data_store.setdefault(user_id, {"photos": [], "text": "", "groups": []})
     store["photos"].append(photo_id)
     await update.message.reply_text("📸 Фото сохранено.")
 
@@ -107,6 +115,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = user_data_store.get(user_id)
+
     if not data or (not data["photos"] and not data["text"]):
         await update.message.reply_text("⚠️ Нет данных для отправки.")
         return
@@ -136,7 +145,10 @@ async def send_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data_store.pop(user_id, None)
 
 
+# ──────────── Запуск ──────────────────────────────────────────────────────────
 async def main():
+    logging.basicConfig(level=logging.INFO)
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -145,15 +157,18 @@ async def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
+    # 1. Регистрируем webhook в API Telegram
     await app.bot.set_webhook(WEBHOOK_URL)
     print("🤖 Webhook установлен!")
 
+    # 2. Запускаем встроенный aiohttp-сервер PTB
     await app.run_webhook(
         listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 10000)),
+        port=PORT,
         webhook_url=WEBHOOK_URL
     )
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
