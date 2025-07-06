@@ -170,5 +170,5 @@ def main():
         webhook_url=f"https://botgroop-6.onrender.com/{BOT_TOKEN}"
     )
 
-if name == "__main__":
+if __name__ == "__main__":
     main()
