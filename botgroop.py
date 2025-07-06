@@ -6,7 +6,7 @@ from telegram.ext import (
 from telegram.error import TelegramError
 import re, logging, os
 
-BOT_TOKEN = os.environ.get("8178775990:AAGGwrAEHAnWRvfbUrnpRbhWHfJjHDPOf1w")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
 user_data_store = {}
