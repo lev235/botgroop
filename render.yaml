@@ -2,6 +2,13 @@ services:
   - type: web
     name: botgroop
     env: python
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "python botgroop.py"
-    pythonVersion: "3.12.3"
+    plan: free
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python botgroop.py
+    envVars:
+      - key: BOT_TOKEN
+        value: 8178775990:AAGGwrAEHAnWRvfbUrnpRbhWHfJjHDPOf1w
+      - key: WEBHOOK_URL
+        value: https://botgroop-6.onrender.com
+    autoDeploy: true
