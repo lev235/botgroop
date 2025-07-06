@@ -1,41 +1,18 @@
-import re
-import logging
-import threading
-import os
-
 from telegram import Update, InputMediaPhoto
 from telegram.ext import (
     ApplicationBuilder, CommandHandler,
     MessageHandler, ContextTypes, filters
 )
 from telegram.error import TelegramError
+import re, logging, os
 
-from flask import Flask
+BOT_TOKEN = os.environ.get("8178775990:AAGGwrAEHAnWRvfbUrnpRbhWHfJjHDPOf1w")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
-# 👇 Flask-сервер для Render
-app = Flask(__name__)
-
-@app.route('/')
-def index():
-    return '🤖 Бот работает!'
-
-def run_web():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
-
-threading.Thread(target=run_web).start()
-
-
-# 🔐 ВСТАВЬ СВОЙ ТОКЕН от BotFather
-BOT_TOKEN = "8178775990:AAGGwrAEHAnWRvfbUrnpRbhWHfJjHDPOf1w"
-
-# Память пользователей
 user_data_store = {}
 
-# Поиск ссылок и @
 LINK_RE = re.compile(r'(https?://t\.me/[^\s]+|@[\w\d_]+)', re.IGNORECASE)
 
-# Извлекаем цели рассылки
 def extract_targets(text: str) -> list[str]:
     links = LINK_RE.findall(text)
     normalized = []
@@ -45,13 +22,11 @@ def extract_targets(text: str) -> list[str]:
         else:
             tail = raw.rsplit('/', 1)[-1]
             if tail.startswith('+'):
-                normalized.append(raw)  # инвайт-ссылка
+                normalized.append(raw)
             else:
                 normalized.append('@' + tail)
     return normalized
 
-
-# Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Привет! Я бот для рассылки постов.\n"
@@ -60,12 +35,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Когда всё готово — напиши /send"
     )
 
-
-# Добавление групп
 async def add_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     targets = extract_targets(update.message.text)
-
     if not targets:
         await update.message.reply_text("⚠️ Я не нашёл ни одной ссылки или @юзернейма.")
         return
@@ -97,12 +69,10 @@ async def add_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if added:
         msg.append(f"✅ Добавил: {', '.join(added)}")
     if failed:
-        msg.append(f"⚠️ Не удалось: {', '.join(failed)}\n"
-                   "Убедитесь, что бот добавлен в группы и имеет права.")
+        msg.append(f"⚠️ Не удалось: {', '.join(failed)}\nУбедитесь, что бот добавлен в группы и имеет права.")
+
     await update.message.reply_text('\n'.join(msg))
 
-
-# Получение фото
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     store = user_data_store.setdefault(user_id, {'photos': [], 'text': '', 'groups': []})
@@ -110,8 +80,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     store['photos'].append(photo_id)
     await update.message.reply_text("📸 Фото сохранено.")
 
-
-# Получение текста
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text.startswith('/'):
         return
@@ -120,12 +88,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     store['text'] = update.message.text
     await update.message.reply_text("✏️ Текст сохранён.")
 
-
-# Команда /send — отправка
 async def send_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = user_data_store.get(user_id)
-
     if not data or (not data['photos'] and not data['text']):
         await update.message.reply_text("⚠️ Нет данных для отправки.")
         return
@@ -148,23 +113,33 @@ async def send_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
             errors.append(f"{gid}: {e}")
 
     if errors:
-        await update.message.reply_text("❌ Часть групп не приняла пост:\n" + "\n".join(errors))
+        await update.message.reply_text("Часть групп не приняла пост:\n" + "\n".join(errors))
     else:
         await update.message.reply_text("✅ Пост разослан по всем группам!")
 
     user_data_store.pop(user_id, None)
 
-
-# Запуск бота
+# === 🔥 WEBHOOK ЗАПУСК ===
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
-    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+    from telegram.ext import ApplicationBuilder
+    import asyncio
 
-    app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(CommandHandler("addgroups", add_groups))
-    app_bot.add_handler(CommandHandler("send", send_post))
-    app_bot.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    async def main():
+        app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    print("🤖 Бот запущен...")
-    app_bot.run_polling()
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("addgroups", add_groups))
+        app.add_handler(CommandHandler("send", send_post))
+        app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+        await app.bot.set_webhook(WEBHOOK_URL)
+        print("🤖 Webhook установлен!")
+
+        await app.run_webhook(
+            listen="0.0.0.0",
+            port=10000,
+            webhook_url=WEBHOOK_URL
+        )
+
+    asyncio.run(main())
