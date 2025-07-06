@@ -158,8 +158,8 @@ async def main():
     await app.run_webhook(
         listen="0.0.0.0",
         port=int(os.environ.get("PORT", 10000)),
-        webhook_url=WEBHOOK_URL,
-        webhook_path="/webhook",  # 👈 вот это добавь
+        webhook_url=WEBHOOK_URL,    # полный URL, как и раньше
+        path="/webhook",            # <-- правильное имя параметра
     )
 
 
