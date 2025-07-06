@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Например, https://yourdomain.com
-PORT = int(os.getenv("PORT", "8443"))
+PORT = int(os.getenv("PORT", 10000))
 
 user_groups = {}
 user_posts = {}
