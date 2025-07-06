@@ -1,8 +1,7 @@
 import os
-import re
 import asyncio
-import nest_asyncio
 import logging
+import re
 
 from telegram import Update, InputMediaPhoto
 from telegram.ext import (
@@ -14,11 +13,8 @@ from telegram.ext import (
 )
 from telegram.error import TelegramError
 
-nest_asyncio.apply()
-
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8178775990:AAGGwrAEHAnWRvfbUrnpRbhWHfJjHDPOf1w")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://botgroop-6.onrender.com/webhook")
-PORT = int(os.environ.get("PORT", 10000))
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
 user_data_store = {}
 
@@ -141,11 +137,7 @@ async def send_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def main():
-    app = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .build()
-    )
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("addgroups", add_groups))
@@ -156,10 +148,10 @@ async def main():
     await app.bot.set_webhook(WEBHOOK_URL)
     print("🤖 Webhook установлен!")
 
-    # просто запускаем webhook-сервер
     await app.run_webhook(
         listen="0.0.0.0",
-        port=PORT
+        port=int(os.environ.get("PORT", 10000)),
+        webhook_url=WEBHOOK_URL
     )
 
 
