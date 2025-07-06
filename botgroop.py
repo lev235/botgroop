@@ -23,7 +23,7 @@ nest_asyncio.apply()    # патчим уже работающий event-loop
 # ────────────────────────────
 BOT_TOKEN    = os.environ.get("BOT_TOKEN")
 WEBHOOK_URL  = os.environ.get("WEBHOOK_URL")          # полный https-URL
-PORT         = int(os.environ.get("PORT", 10000))     # Render сам задаёт PORT
+PORT         = int(os.environ.get("PORT", 8443))     # Render сам задаёт PORT
 
 # Память между сообщениями (RAM-store, сбрасывается при рестарте)
 user_data_store: dict[int, dict] = {}
